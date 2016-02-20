@@ -4070,13 +4070,13 @@ proc channel.read(ref args ...?k,
 
 // documented in the error= version
 pragma "no doc"
-proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low, amount = arg.domain.high - start) : bool
+proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low, amount = arg.domain.high + 1 - start) : bool
 where arg.rank == 1 && isRectangularArr(arg)
 {
   var e:syserr = ENOERR;
   var got = this.readline(arg, numRead, start, amount, error=e);
   if !e && got then return true;
-  else if e == EEOF || !got then return false;
+  else if e == EEOF then return false; // Don't halt on EEOF, just return false
   else {
     this._ch_ioerror(e, "in channel.readline(arg : [] uint(8))");
     return false;
@@ -4084,8 +4084,8 @@ where arg.rank == 1 && isRectangularArr(arg)
 }
 
 /*
-  Read a line into a Chapel array of bytes. Reads until a ``\n`` is reached.
-  The ``\n`` is consumed but not returned in the array.
+  Read a line into a Chapel array of bytes. Reads until a ``\n`` or the end of the channel is reached.
+  The ``\n`` is returned in the array.
 
   :arg arg: A 1D DefaultRectangular array which must have at least 1 element.
   :arg numRead: The number of bytes read.
@@ -4096,28 +4096,32 @@ where arg.rank == 1 && isRectangularArr(arg)
               will halt with an error message.
   :returns: true if the bytes were read without error.
 */
-proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low, amount = arg.domain.high - start, out error:syserr) : bool
+proc channel.readline(arg: [] uint(8), out numRead : int, start = arg.domain.low, amount = arg.domain.high + 1 - start, out error:syserr) : bool
 where arg.rank == 1 && isRectangularArr(arg)
 {
   error = ENOERR;
 
   // Make sure the arguments are valid
-  if arg.size == 0 || !arg.domain.member(start) || amount <= 0 || (start + amount > arg.domain.high)  then return false;
+  const maxIdx = start + amount - 1;
+  if arg.size == 0 || !arg.domain.member(start) || amount < 1 || !arg.domain.member(maxIdx) then return false;
 
   on this.home {
     this.lock();
     param newLineChar = 0x0A;
     var got : int;
     var i = start;
-    const maxIdx = start + amount;
     while i <= maxIdx {
       got = qio_channel_read_byte(false, this._channel_internal);
+      if got < 0 then break; // Got error
       arg[i] = got:uint(8);
       i += 1;
-      if got < 0 || got == newLineChar then break;
+      if got == newLineChar then break;
     }
     numRead = i - start;
-    if got < 0 then error = (-got):syserr;
+    if got < 0 {
+      e = (-got):syserr;
+      if e != EEOF || numRead == 0 then error = e; // Don't return EEOF if some bytes have been read
+    }
     this.unlock();
   }
   return !error;
